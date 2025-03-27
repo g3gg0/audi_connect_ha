@@ -341,6 +341,38 @@ class AudiConnectAccount:
             )
             return False
 
+    async def stop_climate_control(
+        self,
+        vin: str,
+    ):
+        if not self._loggedin:
+            await self.login()
+
+        if not self._loggedin:
+            return False
+
+        try:
+            _LOGGER.debug(
+                f"Sending command to stop climate control for vehicle {vin}"
+            )
+
+            await self._audi_service.stop_climate_control(
+                vin,
+            )
+
+            _LOGGER.debug(f"Successfully stopped climate control of vehicle {vin}")
+
+            await self.notify(vin, ACTION_CLIMATISATION)
+
+            return True
+
+        except Exception as exception:
+            _LOGGER.error(
+                f"Unable to stop climate control of vehicle {vin}. Error: {exception}",
+                exc_info=True,
+            )
+            return False
+
     async def set_battery_charger(self, vin: str, activate: bool, timer: bool):
         if not self._loggedin:
             await self.login()

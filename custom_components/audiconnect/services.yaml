@@ -66,3 +66,11 @@ start_climate_control:
     seat_rr:
       selector:
         boolean:
+
+stop_climate_control:
+  fields:
+    vin:
+      required: true
+      example: WBANXXXXXX1234567
+      selector:
+        text:

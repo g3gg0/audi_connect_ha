@@ -63,6 +63,13 @@ SERVICE_START_CLIMATE_CONTROL_SCHEMA = vol.Schema(
     }
 )
 
+SERVICE_STOP_CLIMATE_CONTROL = "stop_climate_control"
+SERVICE_STOP_CLIMATE_CONTROL_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_VIN): cv.string,
+    }
+)
+
 PLATFORMS: list[str] = [
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
@@ -117,6 +124,12 @@ class AudiAccount(AudiConnectObserver):
             SERVICE_START_CLIMATE_CONTROL,
             self.start_climate_control,
             schema=SERVICE_START_CLIMATE_CONTROL_SCHEMA,
+        )
+        self.hass.services.async_register(
+            DOMAIN,
+            SERVICE_STOP_CLIMATE_CONTROL,
+            self.stop_climate_control,
+            schema=SERVICE_STOP_CLIMATE_CONTROL_SCHEMA,
         )
         self.hass.services.async_register(
             DOMAIN,
@@ -237,6 +250,14 @@ class AudiAccount(AudiConnectObserver):
             seat_fr,
             seat_rl,
             seat_rr,
+        )
+        
+    async def stop_climate_control(self, service):
+        _LOGGER.debug("Initiating Stop Climate Control Service...")
+        vin = service.data.get(CONF_VIN).lower()
+
+        await self.connection.stop_climate_control(
+            vin,
         )
 
     async def handle_notification(self, vin: str, action: str) -> None:

@@ -778,6 +778,94 @@ class AudiService:
                 "action.actionState",
             )
 
+    async def stop_climate_control(self, vin: str):
+        """Stops the vehicle climatisation."""
+        _LOGGER.debug(f"Attempting to stop climate control for VIN {vin}")
+
+        # --- Determine Country (Headers depend on it) ---
+        # Ensure self._country and potentially self._type, self._bearer_token_json, etc.
+        # are initialized correctly in your class instance.
+        country = self._country
+        headers = {}
+        url = None
+        # Stop action likely requires an empty JSON body or a specific action type
+        data = json.dumps({}) # Default to empty JSON object for POST
+
+        try:
+            if country == "DE":
+                # Use the specified endpoint for EMEA/Germany
+                url = "https://emea.bff.cariad.digital/vehicle/v1/vehicles/{vin}/climatisation/stop".format(
+                    vin=vin.upper()
+                )
+                # Use specific bearer token header for DE
+                headers = {
+                    "Authorization": "Bearer " + self._bearer_token_json["access_token"],
+                    "Content-Type": "application/json", # Often needed even for empty body
+                    "Accept": "application/json", # Good practice to include Accept
+                }
+
+            elif country == "US":
+                # --- UNCERTAIN: Endpoint/Data for US Stop needs verification ---
+                _LOGGER.warning("US stop climate endpoint/data structure is assumed and may need verification.")
+                # Assumption 1: Maybe uses /actions endpoint with a specific type?
+                url = "https://mal-3a.prd.eu.dp.vwg-connect.com/api/bs/climatisation/v1/vehicles/{vin}/climater/actions".format(
+                     vin=vin.upper()
+                )
+                stop_action_data = {"action": {"type": "stopClimatisation"}} # Hypothetical data
+                data = json.dumps(stop_action_data)
+                headers = self._get_vehicle_action_header("application/json", None)
+                # Assumption 2: Maybe has a dedicated /stop endpoint like DE?
+                # url = "https://mal-3a.prd.eu.dp.vwg-connect.com/api/bs/climatisation/v1/vehicles/{vin}/climater/stop".format(vin=vin.upper()) # Hypothetical
+                # data = json.dumps({})
+                # headers = self._get_vehicle_action_header("application/json", None)
+
+
+            else: # Other countries
+                # --- UNCERTAIN: Endpoint/Data for Other Region Stop needs verification ---
+                _LOGGER.warning("Other region stop climate endpoint/data structure is assumed and may need verification.")
+                home_region = await self._get_home_region(vin.upper())
+                # Assumption 1: Maybe uses /actions endpoint?
+                url = "{homeRegion}/fs-car/bs/climatisation/v1/{type}/{country}/vehicles/{vin}/climater/actions".format(
+                   homeRegion=home_region, type=self._type, country=self._country, vin=vin.upper()
+                )
+                stop_action_data = {"action": {"type": "stopClimatisation"}} # Hypothetical data
+                data = json.dumps(stop_action_data)
+                headers = self._get_vehicle_action_header("application/json", None)
+                # Assumption 2: Maybe has a dedicated /stop endpoint?
+                # url = "{homeRegion}/fs-car/bs/climatisation/v1/{type}/{country}/vehicles/{vin}/climater/stop".format(homeRegion=home_region, type=self._type, country=self._country, vin=vin.upper()) # Hypothetical
+                # data = json.dumps({})
+                # headers = self._get_vehicle_action_header("application/json", None)
+
+
+            # --- Make the API Request ---
+            if not url or not headers:
+                 _LOGGER.error(f"Could not determine URL or headers for stopping climate in country {country}")
+                 return False # Indicate failure
+
+            _LOGGER.debug(f"Sending POST to {url} with headers {headers} and data {data}")
+            res = await self._api.request(
+                "POST",
+                url,
+                headers=headers,
+                data=data, # Send the JSON data (empty or specific action)
+            )
+            _LOGGER.debug(f"Stop climate response: {res}") # Log the response for debugging
+
+            # --- Response Checking (Placeholder) ---
+            # The 'check_request_succeeded' logic might be needed depending on the API response.
+            # Check the actual response `res` to determine success/failure.
+            # For now, we assume success if no exception occurred during the request.
+            # You might need to check res['action']['actionState'] or HTTP status code.
+
+            return True # Indicate presumed success
+
+        except KeyError as e:
+             _LOGGER.error(f"Configuration key error stopping climate: {e}. Check token/country setup.")
+             return False
+        except Exception as e:
+            _LOGGER.error(f"Error stopping climate control for {vin}: {e}")
+            return False # Indicate failure
+            
     async def set_window_heating(self, vin: str, start: bool):
         data = '<?xml version="1.0" encoding= "UTF-8" ?><action><type>{action}</type></action>'.format(
             action="startWindowHeating" if start else "stopWindowHeating"
