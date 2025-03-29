@@ -2,7 +2,8 @@ import time
 from datetime import datetime, timezone, timedelta
 import logging
 import asyncio
-from typing import List
+import copy
+from typing import List, Optional
 import re
 
 from asyncio import TimeoutError
@@ -260,6 +261,31 @@ class AudiConnectAccount:
                     action="lock" if lock else "unlock", vin=vin
                 ),
             )
+
+
+    async def async_get_climate_settings(self, vin: str) -> Optional[dict]:
+        """Pass through to get climate settings from AudiService."""
+        if not self._loggedin:
+            await self.login()
+        if not self._loggedin:
+            return None # Or raise an error
+        # Make sure _audi_service is initialized
+        if hasattr(self, '_audi_service') and self._audi_service:
+            return await self._audi_service.async_get_climate_settings(vin)
+        _LOGGER.error("Audi Service not available for get_climate_settings")
+        return None
+
+    async def async_set_climate_settings(self, vin: str, settings_data: dict) -> bool:
+        """Pass through to set climate settings via AudiService."""
+        if not self._loggedin:
+            await self.login()
+        if not self._loggedin:
+            return False # Or raise an error
+        if hasattr(self, '_audi_service') and self._audi_service:
+            return await self._audi_service.async_set_climate_settings(vin, settings_data)
+        _LOGGER.error("Audi Service not available for set_climate_settings")
+        return False
+
 
     async def set_vehicle_climatisation(self, vin: str, activate: bool):
         if not self._loggedin:
@@ -547,6 +573,8 @@ class AudiConnectVehicle:
             await self.call_update(self.update_vehicle_position, 3)
             info = "climater"
             await self.call_update(self.update_vehicle_climater, 3)
+            info = "climate_settings"
+            await self.call_update(self.update_vehicle_climate_settings, 3)            
             # info = "charger"
             # await self.call_update(self.update_vehicle_charger, 3)
             info = "preheater"
@@ -560,6 +588,9 @@ class AudiConnectVehicle:
                     info, self._vehicle.vin
                 ),
             )
+            # Even on error, return _no_error state which might be False if earlier steps failed
+            return self._no_error
+
 
     def log_exception_once(self, exception, message):
         self._no_error = False
@@ -567,6 +598,83 @@ class AudiConnectVehicle:
         if err not in self._logged_errors:
             self._logged_errors.add(err)
             _LOGGER.error(err, exc_info=True)
+
+
+    async def update_vehicle_climate_settings(self):
+        """Fetches and updates climate settings state from selective status."""
+        redacted_vin = "*" * (len(self._vin) - 4) + self._vin[-4:]
+        _LOGGER.debug(f"CLIMATE SETTINGS: Starting update for VIN {redacted_vin} from selective status")
+
+        if not hasattr(self._audi_service, 'async_get_climate_settings'):
+            _LOGGER.debug(f"CLIMATE SETTINGS: AudiService has no async_get_climate_settings method. Skipping update for VIN {redacted_vin}.")
+            return
+
+        try:
+            # Call the updated async_get_climate_settings which now uses the selective status URL
+            full_response = await self._audi_service.async_get_climate_settings(self._vin)
+
+            # --- NEW PARSING LOGIC ---
+            if full_response and isinstance(full_response, dict) and 'climatisation' in full_response:
+                climatisation_data = full_response.get('climatisation', {})
+
+                # Extract Settings
+                settings_value = climatisation_data.get('climatisationSettings', {}).get('value', {})
+                if settings_value and isinstance(settings_value, dict):
+                    target_temp_c = settings_value.get('targetTemperature_C')
+                    if target_temp_c is not None:
+                        try:
+                            # Temperature is directly available in Celsius
+                            self._vehicle.state["targetTemperature"] = round(float(target_temp_c), 1)
+                            _LOGGER.debug(f"CLIMATE SETTINGS: Updated targetTemperature={self._vehicle.state['targetTemperature']} C from settings for VIN {redacted_vin}")
+                        except (ValueError, TypeError):
+                            _LOGGER.warning(f"CLIMATE SETTINGS: Invalid targetTemperature_C format '{target_temp_c}' for VIN {redacted_vin}")
+                            self._vehicle.state["targetTemperature"] = None
+                    else:
+                        self._vehicle.state["targetTemperature"] = None # Explicitly set to None if missing
+
+                    # Store other relevant settings if needed by instruments later
+                    self._vehicle.state["windowHeatingEnabled"] = settings_value.get('windowHeatingEnabled')
+                    # Add zoneFrontLeftEnabled, zoneFrontRightEnabled etc. if you plan to use them
+                    self._vehicle.state["zoneFrontLeftEnabled"] = settings_value.get('zoneFrontLeftEnabled')
+                    self._vehicle.state["zoneFrontRightEnabled"] = settings_value.get('zoneFrontRightEnabled')
+
+                else:
+                     # Clear target temp if settings structure is missing/invalid
+                     self._vehicle.state["targetTemperature"] = None
+                     _LOGGER.debug(f"CLIMATE SETTINGS: No valid 'climatisationSettings.value' found for VIN {redacted_vin}")
+
+                # Extract Status (Overwrites value potentially fetched by update_vehicle_climater, which might be fine)
+                status_value = climatisation_data.get('climatisationStatus', {}).get('value', {})
+                if status_value and isinstance(status_value, dict):
+                    self._vehicle.state["climatisationState"] = status_value.get('climatisationState')
+                    remaining_time = status_value.get('remainingClimatisationTime_min')
+                    # Store remaining time if needed (ensure consistency with how update_vehicle_climater stored it)
+                    try:
+                        self._vehicle.state["remainingClimatisationTime"] = int(remaining_time) if remaining_time is not None else None
+                    except (ValueError, TypeError):
+                         self._vehicle.state["remainingClimatisationTime"] = None
+
+                    _LOGGER.debug(f"CLIMATE SETTINGS: Updated climatisationState='{self._vehicle.state['climatisationState']}', remainingTime={self._vehicle.state.get('remainingClimatisationTime')} min from status for VIN {redacted_vin}")
+                else:
+                    # Clear status state if structure missing/invalid (optional, depends if you rely on update_vehicle_climater as fallback)
+                    # self._vehicle.state["climatisationState"] = None
+                    # self._vehicle.state["remainingClimatisationTime"] = None
+                    _LOGGER.debug(f"CLIMATE SETTINGS: No valid 'climatisationStatus.value' found for VIN {redacted_vin}")
+
+            else:
+                 _LOGGER.debug(f"CLIMATE SETTINGS: No valid 'climatisation' data received for VIN {redacted_vin}. Response: {full_response}")
+                 # Clear states if the top-level structure is missing
+                 self._vehicle.state["targetTemperature"] = None
+                 # self._vehicle.state["climatisationState"] = None # Optional clear
+                 # self._vehicle.state["remainingClimatisationTime"] = None # Optional clear
+            # --- END NEW PARSING LOGIC ---
+
+        except TimeoutError:
+            _LOGGER.warning(f"CLIMATE SETTINGS: Timeout getting selective status for VIN {redacted_vin}")
+        except Exception as e:
+             self.log_exception_once(e, f"CLIMATE SETTINGS: Error processing selective status for VIN {redacted_vin}")
+ 
+
 
     async def update_vehicle_statusreport(self):
         if not self.support_status_report:
@@ -1951,6 +2059,31 @@ class AudiConnectVehicle:
         check = self._vehicle.state.get("longterm_reset")
         if check:
             return True
+
+    @property
+    def target_temperature(self):
+        """Return target temperature in Celsius."""
+        if self.target_temperature_supported:
+            # Value is already stored in Celsius by update_vehicle_climate_settings
+            return self._vehicle.state.get("targetTemperature")
+        return None
+
+    @property
+    def target_temperature_supported(self):
+        """Check if target temperature is available."""
+        # Check if the key exists and the value is not None
+        return self._vehicle.state.get("targetTemperature") is not None
+        
+    @property
+    def climatisation_state(self):
+        if self.climatisation_state_supported:
+            return self._vehicle.state.get("climatisationState")
+
+    @property
+    def climatisation_state_supported(self):
+        check = self._vehicle.state.get("climatisationState")
+        # Check if it exists and is not None (or handle empty string if API sends that)
+        return check is not None
 
     @property
     def is_moving(self):

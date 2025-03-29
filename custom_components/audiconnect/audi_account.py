@@ -25,6 +25,7 @@ from .const import (
     CONF_SPIN,
     CONF_VIN,
     DOMAIN,
+    CLIMATE_UPDATE,
     SIGNAL_STATE_UPDATED,
     TRACKER_UPDATE,
     UPDATE_SLEEP,
@@ -76,6 +77,7 @@ PLATFORMS: list[str] = [
     Platform.DEVICE_TRACKER,
     Platform.LOCK,
     Platform.SWITCH,
+    Platform.CLIMATE,
 ]
 
 SERVICE_REFRESH_CLOUD_DATA = "refresh_cloud_data"
@@ -163,6 +165,13 @@ class AudiAccount(AudiConnectObserver):
                     if instrument._component in COMPONENTS
                     and self.is_enabled(instrument.slug_attr)
                 ):
+                    _LOGGER.debug(
+                        "Processing Instrument: Name=%s, Component=%s, Slug=%s, Enabled=%s",
+                        instrument.name,
+                        instrument._component,
+                        instrument.slug_attr,
+                        self.is_enabled(instrument.slug_attr),
+                    )
                     if instrument._component == "sensor":
                         cfg_vehicle.sensors.add(instrument)
                     if instrument._component == "binary_sensor":
@@ -173,6 +182,8 @@ class AudiAccount(AudiConnectObserver):
                         cfg_vehicle.device_trackers.add(instrument)
                     if instrument._component == "lock":
                         cfg_vehicle.locks.add(instrument)
+                    if instrument._component == "climate":
+                        cfg_vehicle.climates.add(instrument)
 
             await self.hass.config_entries.async_forward_entry_setups(
                 self.config_entry, PLATFORMS
@@ -198,6 +209,9 @@ class AudiAccount(AudiConnectObserver):
         for config_vehicle in self.config_vehicles:
             for instrument in config_vehicle.device_trackers:
                 async_dispatcher_send(self.hass, TRACKER_UPDATE, instrument)
+            for instrument in config_vehicle.climates:
+                async_dispatcher_send(self.hass, CLIMATE_UPDATE, instrument)
+ 
 
         _LOGGER.debug("Successfully refreshed cloud data")
         return True
@@ -260,6 +274,42 @@ class AudiAccount(AudiConnectObserver):
             vin,
         )
 
+    async def async_set_climate_temp(self, vin: str, temperature: float) -> None:
+        """Set the target climate temperature using the GET/PUT settings endpoint."""
+        _LOGGER.debug("Setting climate temperature for VIN %s to %.1f C via settings endpoint", vin, temperature)
+        vin_upper = vin.upper() # Ensure VIN is uppercase for API calls
+
+        try:
+            # 1. Get current settings
+            current_settings = await self.connection.async_get_climate_settings(vin_upper)
+            if not current_settings:
+                _LOGGER.error("Failed to get current climate settings for VIN %s. Cannot set temperature.", vin)
+                return
+
+            # 2. Modify the temperature
+            # Make a copy to avoid modifying the original potentially cached dict
+            updated_settings = copy.deepcopy(current_settings)
+
+            # Ensure the targetTemperature key exists before trying to set it
+            # The API expects a float/number here.
+            updated_settings['targetTemperature'] = float(temperature)
+            updated_settings['targetTemperatureUnit'] = 'celsius' # Explicitly set unit
+
+            _LOGGER.debug("Updated settings object for PUT: %s", updated_settings)
+
+            # 3. PUT the updated settings
+            success = await self.connection.async_set_climate_settings(vin_upper, updated_settings)
+
+            if success:
+                _LOGGER.info("Climate temperature settings update request sent successfully for VIN %s", vin)
+                # Trigger a refresh shortly after to see the change reflected
+                self.hass.async_create_task(self._refresh_after_action(vin))
+            else:
+                _LOGGER.error("Failed to PUT updated climate settings for VIN %s", vin)
+
+        except Exception as e:
+            _LOGGER.error("Error setting climate temperature via settings endpoint for VIN %s: %s", vin, e)
+
     async def handle_notification(self, vin: str, action: str) -> None:
         await self._refresh_vehicle_data(vin)
 
@@ -294,3 +344,14 @@ class AudiAccount(AudiConnectObserver):
             await self.update(utcnow())
         except Exception as e:
             _LOGGER.exception("Refresh cloud data failed: %s", str(e))
+
+    # --- Helper method to trigger refresh after an action ---
+    async def _refresh_after_action(self, vin: str, delay: int = UPDATE_SLEEP):
+        """Schedule a refresh after performing an action."""
+        _LOGGER.debug("Scheduling cloud data refresh in %d seconds after action for VIN %s", delay, vin)
+        await asyncio.sleep(delay)
+        try:
+            _LOGGER.debug("Requesting post-action cloud data refresh now...")
+            await self.update(utcnow())
+        except Exception as e:
+            _LOGGER.exception("Post-action refresh cloud data failed: %s", str(e))

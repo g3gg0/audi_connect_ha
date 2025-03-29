@@ -54,6 +54,9 @@ class Instrument:
             return False
 
         if not self.is_supported:
+            if self._component == "climate" and not self.is_climate_supported(vehicle):
+                 _LOGGER.debug("%s Climate component support check failed.", self)
+                 return False
             # _LOGGER.debug(
             #     "%s (%s:%s) is not supported", self, type(self).__name__, self._attr,
             # )
@@ -134,6 +137,10 @@ class Instrument:
     def attributes(self):
         return {}
 
+
+    # Specific check for climate component support
+    def is_climate_supported(self, vehicle):
+         return vehicle.climatisation_state_supported and vehicle.target_temperature_supported
 
 class Sensor(Instrument):
     def __init__(
@@ -267,6 +274,37 @@ class Switch(Instrument):
 
     def turn_off(self):
         pass
+
+
+class Climate(Instrument):
+    """Represents the Climate Control component."""
+    def __init__(self):
+        # Use a relevant attribute name that might exist or just a placeholder
+        # The core functionality relies on the component type being 'climate'
+        # and the HA entity accessing properties via the vehicle object.
+        super().__init__(
+            component="climate",
+            attr="climate_control", # Placeholder attribute name
+            name="Climate Control", # Entity name suffix
+            icon="mdi:thermostat",   # Default climate icon
+        )
+
+    @property
+    def is_mutable(self):
+        # Climate control involves actions (setting temp, turning on/off)
+        return True
+
+    @property
+    def is_supported(self):
+        # Override is_supported specifically for Climate
+        # Check if the vehicle object supports both essential climate properties
+        # Ensure AudiConnectVehicle has these properties defined
+        if self._vehicle:
+             has_state = getattr(self._vehicle, "climatisation_state_supported", False)
+             has_target = getattr(self._vehicle, "target_temperature_supported", False)
+             _LOGGER.debug("Climate support check: State=%s, TargetTemp=%s", has_state, has_target)
+             return has_state and has_target
+        return False
 
 
 class Preheater(Instrument):
@@ -423,6 +461,7 @@ def create_instruments():
         TripData(attr="longterm_reset", name="LongTerm Trip User Reset"),
         Lock(),
         Preheater(),
+        Climate(),
         Sensor(
             attr="model",
             name="Model",
@@ -786,7 +825,6 @@ def create_instruments():
             entity_category=EntityCategory.DIAGNOSTIC,
         ),
     ]
-
 
 class Dashboard:
     def __init__(self, connection, vehicle, **config):

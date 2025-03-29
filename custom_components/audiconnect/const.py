@@ -26,6 +26,7 @@ CONF_MUTABLE = "mutable"
 
 SIGNAL_STATE_UPDATED = "{}.updated".format(DOMAIN)
 TRACKER_UPDATE = f"{DOMAIN}_tracker_update"
+CLIMATE_UPDATE = f"{DOMAIN}_climate_update" # Add this line for climate updates
 
 RESOURCES = [
     "position",
@@ -79,6 +80,7 @@ COMPONENTS = {
     "lock": "lock",
     "device_tracker": "device_tracker",
     "switch": "switch",
+    "climate": "climate",
 }
 
 REGION_EUROPE: str = "DE"

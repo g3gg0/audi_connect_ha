@@ -4,6 +4,7 @@ import base64
 import os
 import re
 import logging
+import copy
 from datetime import timedelta, datetime
 from typing import Optional
 
@@ -402,6 +403,76 @@ class AudiService:
         await self._fill_home_region(vin)
 
         return self._homeRegionSetter[vin]
+
+    async def async_get_climate_settings(self, vin: str) -> Optional[dict]:
+        """Gets the current climate settings using the cariad endpoint."""
+        redacted_vin = "*" * (len(vin) - 4) + vin[-4:]
+        _LOGGER.debug(f"Attempting to GET climate settings for VIN {redacted_vin}")
+
+        # This endpoint seems tied to the newer API/bearer token
+        if not self._bearer_token_json or "access_token" not in self._bearer_token_json:
+            _LOGGER.error(f"Bearer token not available for getting climate settings for VIN {redacted_vin}")
+            return None
+
+        # Determine region for the URL
+        region = "emea" if self._country.upper() != "US" else "na"
+        url = f"https://{region}.bff.cariad.digital/vehicle/v1/vehicles/{vin.upper()}/selectivestatus?jobs=climatisation"
+
+        headers = {
+            "Authorization": "Bearer " + self._bearer_token_json["access_token"]
+        }
+        try:
+            _LOGGER.debug(f"Sending GET to {url} with headers {headers}")
+            response_data = await self._api.request(
+                "GET",
+                url,
+                headers=headers,
+                data=None,
+            )
+            _LOGGER.debug(f"GET climate settings response for VIN {redacted_vin}: {response_data}")
+            return response_data
+        except Exception as e:
+            _LOGGER.error(f"Error getting climate settings for VIN {redacted_vin}: {e}")
+            return None
+
+    async def async_set_climate_settings(self, vin: str, settings_data: dict) -> bool:
+        """Sets the climate settings using the cariad endpoint (PUT)."""
+        redacted_vin = "*" * (len(vin) - 4) + vin[-4:]
+        _LOGGER.debug(f"Attempting to PUT climate settings for VIN {redacted_vin}: {settings_data}")
+
+        if not self._bearer_token_json or "access_token" not in self._bearer_token_json:
+            _LOGGER.error(f"Bearer token not available for setting climate settings for VIN {redacted_vin}")
+            return False
+
+        region = "emea" if self._country.upper() != "US" else "na"
+        url = f"https://{region}.bff.cariad.digital/vehicle/v1/vehicles/{vin.upper()}/climatisation/settings"
+
+        headers = {
+            "Authorization": "Bearer " + self._bearer_token_json["access_token"]
+        }
+        try:
+            json_data = json.dumps(settings_data)
+            _LOGGER.debug(f"Sending PUT to {url} with headers {headers} and data {json_data}")
+            # Use request method directly for PUT
+            # Assuming self._api.request handles PUT correctly
+            response, _ = await self._api.request(
+                 "PUT",
+                 url,
+                 data=json_data,
+                 headers=headers,
+            )
+            _LOGGER.debug(f"PUT climate settings response status for VIN {redacted_vin}: {response.status}")
+            # Check for success status codes (e.g., 200, 202, 204)
+            if 200 <= response.status < 300:
+                 _LOGGER.info(f"Successfully PUT climate settings for VIN {redacted_vin}")
+                 return True
+            else:
+                 _LOGGER.error(f"Failed to PUT climate settings for VIN {redacted_vin}. Status: {response.status}, Response: {await response.text()}")
+                 return False
+        except Exception as e:
+             _LOGGER.error(f"Error setting climate settings for VIN {redacted_vin}: {e}")
+             return False
+
 
     async def _get_security_token(self, vin: str, action: str):
         # Challenge

@@ -10,6 +10,7 @@ class VehicleData:
         self.binary_sensors = set()
         self.switches = set()
         self.device_trackers = set()
+        self.climates = set()
         self.locks = set()
         self.config_entry = config_entry
         self.vehicle = None
