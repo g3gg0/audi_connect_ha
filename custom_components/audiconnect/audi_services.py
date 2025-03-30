@@ -453,22 +453,23 @@ class AudiService:
         try:
             json_data = json.dumps(settings_data)
             _LOGGER.debug(f"Sending PUT to {url} with headers {headers} and data {json_data}")
-            # Use request method directly for PUT
-            # Assuming self._api.request handles PUT correctly
-            response, _ = await self._api.request(
+            
+            res = await self._api.request(
                  "PUT",
                  url,
                  data=json_data,
                  headers=headers,
             )
-            _LOGGER.debug(f"PUT climate settings response status for VIN {redacted_vin}: {response.status}")
-            # Check for success status codes (e.g., 200, 202, 204)
-            if 200 <= response.status < 300:
-                 _LOGGER.info(f"Successfully PUT climate settings for VIN {redacted_vin}")
-                 return True
-            else:
-                 _LOGGER.error(f"Failed to PUT climate settings for VIN {redacted_vin}. Status: {response.status}, Response: {await response.text()}")
-                 return False
+
+            await self.check_pending_request_succeeded(
+                url=f"https://{region}.bff.cariad.digital/vehicle/v1/vehicles/{vin.upper()}/pendingrequests",
+                request_id=res["data"]["requestID"],
+                action="set climate settings"
+            )
+
+            _LOGGER.debug(f"PUT climate settings response status for VIN {redacted_vin}: {res}")
+            return True
+
         except Exception as e:
              _LOGGER.error(f"Error setting climate settings for VIN {redacted_vin}: {e}")
              return False
@@ -644,9 +645,7 @@ class AudiService:
                 headers = self._get_vehicle_action_header("application/json", None)
                 res = await self._api.request(
                     "POST",
-                    "https://mal-3a.prd.eu.dp.vwg-connect.com/api/bs/climatisation/v1/vehicles/{vin}/climater/actions".format(
-                        vin=vin.upper(),
-                    ),
+                    f"https://mal-3a.prd.eu.dp.vwg-connect.com/api/bs/climatisation/v1/vehicles/{vin.upper()}/climater/actions",
                     headers=headers,
                     data=data,
                 )
@@ -1021,6 +1020,82 @@ class AudiService:
                 return
 
         raise Exception("Cannot {action}, operation timed out".format(action=action))
+
+    async def check_pending_request_succeeded(
+        self, url: str, request_id: str, action: str,
+    ) -> bool:
+        """
+        Polls a pending requests endpoint until a specific request ID is successful or fails.
+
+        Args:
+            url: The URL of the pending requests endpoint (e.g., /vehicles/{vin}/pendingrequests).
+            request_id: The unique ID of the request to monitor.
+            action: A descriptive string for logging purposes (e.g., "set climate temperature").
+
+        Returns:
+            True if the request status becomes "successful".
+
+        Raises:
+            Exception: If the request status becomes anything other than "successful" or "in_progress",
+                       if the request ID cannot be found after multiple attempts,
+                       or if the operation times out.
+        """
+        _LOGGER.debug(f"Polling endpoint {url} for request ID {request_id} (Action: {action})")
+
+        headers = {
+            "Authorization": "Bearer " + self._bearer_token_json["access_token"]
+        }
+
+        for attempt in range(MAX_RESPONSE_ATTEMPTS):
+            await asyncio.sleep(REQUEST_STATUS_SLEEP)
+            _LOGGER.debug(f"Polling attempt {attempt + 1}/{MAX_RESPONSE_ATTEMPTS} for request {request_id}")
+
+            try:
+                res = await self._api.request(
+                    "GET",
+                    url,
+                    data=None,
+                    headers=headers,
+                )
+
+                if res is None or "data" not in res or not isinstance(res.get("data"), list):
+                    _LOGGER.warning(f"Invalid response structure received when polling for {request_id}. Response: {res}")
+                    continue
+
+                found_request = False
+                for pending_request in res.get("data", []):
+                    if pending_request.get("id") == request_id:
+                        found_request = True
+                        status = pending_request.get("status")
+                        _LOGGER.debug(f"Found request {request_id}, current status: {status}")
+
+                        if status == "successful":
+                            _LOGGER.info(f"Request {request_id} (Action: {action}) completed successfully.")
+                            return True  # Success
+                        elif status == "in_progress":
+                            _LOGGER.info(f"Request {request_id} (Action: {action}) still in progress.")
+                            break
+                        else:
+                            # Any other status (failed, rejected, timeout, None, etc.) is considered a failure
+                            _LOGGER.error(f"Request {request_id} (Action: {action}) failed with status: {status}. Full details: {pending_request}")
+                            raise Exception(
+                                f"Cannot {action}, request {request_id} failed with status '{status}'"
+                            )
+
+                if found_request and status == "in_progress":
+                     continue
+                elif not found_request:
+                     _LOGGER.warning(f"Request ID {request_id} not found in pending requests list (attempt {attempt + 1}). Might be completed or an issue.")
+
+            except Exception as e:
+                 _LOGGER.error(f"Error during polling check for request {request_id} (Action: {action}): {e}")
+                 if "Bearer token missing" in str(e): # Re-raise if it was the token error
+                     raise e
+
+        # End of outer loop (polling attempts)
+        _LOGGER.error(f"Request {request_id} (Action: {action}) timed out after {MAX_RESPONSE_ATTEMPTS} attempts.")
+        raise Exception(f"Cannot {action}, operation timed out for request {request_id}")
+
 
     # TR/2022-12-20: New secret for X_QMAuth
     def _calculate_X_QMAuth(self):

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import copy
 
 import voluptuous as vol
 
@@ -123,18 +124,6 @@ class AudiAccount(AudiConnectObserver):
         )
         self.hass.services.async_register(
             DOMAIN,
-            SERVICE_START_CLIMATE_CONTROL,
-            self.start_climate_control,
-            schema=SERVICE_START_CLIMATE_CONTROL_SCHEMA,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            SERVICE_STOP_CLIMATE_CONTROL,
-            self.stop_climate_control,
-            schema=SERVICE_STOP_CLIMATE_CONTROL_SCHEMA,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
             SERVICE_REFRESH_CLOUD_DATA,
             self.update,
         )
@@ -184,7 +173,16 @@ class AudiAccount(AudiConnectObserver):
                         cfg_vehicle.locks.add(instrument)
                     if instrument._component == "climate":
                         cfg_vehicle.climates.add(instrument)
-
+                        # ADD THIS LOGGING:
+                        _LOGGER.info(
+                            "Found CLIMATE instrument for VIN %s: %s (Added to cfg_vehicle.climates)",
+                            vehicle.vin,
+                            instrument.full_name,
+                         )
+                    else:
+                         # Optional: Log if component not matched
+                         _LOGGER.debug("Instrument component '%s' not specifically handled for %s",
+                                       instrument._component, vehicle.vin)
             await self.hass.config_entries.async_forward_entry_setups(
                 self.config_entry, PLATFORMS
             )
@@ -243,36 +241,27 @@ class AudiAccount(AudiConnectObserver):
         if action == "stop_window_heating":
             await self.connection.set_vehicle_window_heating(vin, False)
 
-    async def start_climate_control(self, service):
+    async def async_start_climate(self, vin: str, temp_f=None, temp_c=None, glass_heating=False, seat_fl=False, seat_fr=False, seat_rl=False, seat_rr=False, **kwargs):
+        """Start climate control via the underlying connection."""
         _LOGGER.debug("Initiating Start Climate Control Service...")
-        vin = service.data.get(CONF_VIN).lower()
-        # Optional Parameters
-        temp_f = service.data.get(CONF_CLIMATE_TEMP_F, None)
-        temp_c = service.data.get(CONF_CLIMATE_TEMP_C, None)
-        glass_heating = service.data.get(CONF_CLIMATE_GLASS, False)
-        seat_fl = service.data.get(CONF_CLIMATE_SEAT_FL, False)
-        seat_fr = service.data.get(CONF_CLIMATE_SEAT_FR, False)
-        seat_rl = service.data.get(CONF_CLIMATE_SEAT_RL, False)
-        seat_rr = service.data.get(CONF_CLIMATE_SEAT_RR, False)
 
         await self.connection.start_climate_control(
-            vin,
-            temp_f,
-            temp_c,
-            glass_heating,
-            seat_fl,
-            seat_fr,
-            seat_rl,
-            seat_rr,
+            vin=vin.lower(), # Pass VIN explicitly
+            temp_f=temp_f,
+            temp_c=temp_c,
+            glass_heating=glass_heating,
+            seat_fl=seat_fl,
+            seat_fr=seat_fr,
+            seat_rl=seat_rl,
+            seat_rr=seat_rr,
         )
         
-    async def stop_climate_control(self, service):
+    async def async_stop_climate(self, vin: str, **kwargs):
+        """Stop climate control via the underlying connection."""
         _LOGGER.debug("Initiating Stop Climate Control Service...")
         vin = service.data.get(CONF_VIN).lower()
 
-        await self.connection.stop_climate_control(
-            vin,
-        )
+        await self.connection.stop_climate_control(vin=vin.lower())
 
     async def async_set_climate_temp(self, vin: str, temperature: float) -> None:
         """Set the target climate temperature using the GET/PUT settings endpoint."""
@@ -280,20 +269,61 @@ class AudiAccount(AudiConnectObserver):
         vin_upper = vin.upper() # Ensure VIN is uppercase for API calls
 
         try:
-            # 1. Get current settings
-            current_settings = await self.connection.async_get_climate_settings(vin_upper)
-            if not current_settings:
-                _LOGGER.error("Failed to get current climate settings for VIN %s. Cannot set temperature.", vin)
+            # 1. Get current full status to extract some settings
+            # This response has the nested structure.
+            current_status_response = await self.connection.async_get_climate_settings(
+                vin_upper
+            )
+            if not current_status_response:
+                _LOGGER.error(
+                    "Failed to get current climate status/settings for VIN %s. Cannot set temperature.",
+                    vin,
+                )
                 return
+
+            # Safely extract the current settings part from the nested structure
+            current_settings_value = (
+                current_status_response.get("climatisation", {})
+                .get("climatisationSettings", {})
+                .get("value", {})
+            )
+
+            if not current_settings_value:
+                 _LOGGER.warning(
+                     "Could not find current 'climatisationSettings.value' in response for VIN %s. Proceeding with defaults.",
+                     vin
+                 )
+                 # Define defaults if current settings aren't found, might be risky
+                 current_settings_value = {
+                     "climatizationAtUnlock": False,
+                     "windowHeatingEnabled": True, # Default based on example? Verify!
+                     "zoneFrontLeftEnabled": False, # Default? Verify!
+                     "zoneFrontRightEnabled": False, # Default? Verify!
+                 }
+
 
             # 2. Modify the temperature
             # Make a copy to avoid modifying the original potentially cached dict
-            updated_settings = copy.deepcopy(current_settings)
-
-            # Ensure the targetTemperature key exists before trying to set it
-            # The API expects a float/number here.
-            updated_settings['targetTemperature'] = float(temperature)
-            updated_settings['targetTemperatureUnit'] = 'celsius' # Explicitly set unit
+            updated_settings = {
+                "targetTemperature": float(temperature),  # Use the requested temperature (already in C)
+                "targetTemperatureUnit": "celsius",
+                "climatizationAtUnlock": current_settings_value.get(
+                    "climatizationAtUnlock", False # Default if missing
+                ),
+                "windowHeatingEnabled": current_settings_value.get(
+                    "windowHeatingEnabled", True # Default if missing (based on example)
+                ),
+                "zoneFrontLeftEnabled": current_settings_value.get(
+                    "zoneFrontLeftEnabled", False # Default if missing
+                ),
+                "zoneFrontRightEnabled": current_settings_value.get(
+                    "zoneFrontRightEnabled", False # Default if missing
+                ),
+                "climatisationWithoutExternalPower": True,
+                # Add zoneRearLeftEnabled / zoneRearRightEnabled if the PUT API expects them
+                #"zoneRearLeftEnabled": current_settings_value.get("zoneRearLeftEnabled", False),
+                #"zoneRearRightEnabled": current_settings_value.get("zoneRearRightEnabled", False),
+            }
 
             _LOGGER.debug("Updated settings object for PUT: %s", updated_settings)
 
@@ -308,7 +338,58 @@ class AudiAccount(AudiConnectObserver):
                 _LOGGER.error("Failed to PUT updated climate settings for VIN %s", vin)
 
         except Exception as e:
-            _LOGGER.error("Error setting climate temperature via settings endpoint for VIN %s: %s", vin, e)
+            _LOGGER.error("Error setting climate temperature via settings endpoint for VIN %s: %s", vin, e, exc_info=True)
+
+    async def async_set_window_heating(self, vin: str, enable: bool) -> bool:
+        """Enable or disable window heating via the PUT settings endpoint."""
+        action = "Enable" if enable else "Disable"
+        _LOGGER.debug(
+            "%s window heating for VIN %s via settings endpoint",
+            action,
+            vin
+        )
+        vin_upper = vin.upper()
+
+        try:
+            # 1. Get current full status to extract settings
+            current_status_response = await self.connection.async_get_climate_settings(vin_upper)
+            if not current_status_response:
+                _LOGGER.error("Failed to get current climate settings for VIN %s. Cannot set window heating.", vin)
+                return False
+
+            current_settings_value = (
+                current_status_response.get("climatisation", {})
+                .get("climatisationSettings", {})
+                .get("value", {})
+            )
+            if not current_settings_value:
+                _LOGGER.error("Could not find current 'climatisationSettings.value' in response for VIN %s. Cannot set window heating.", vin)
+                return False # Cannot proceed without knowing other settings
+
+            # 2. Construct the NEW settings payload required by the PUT endpoint
+            updated_settings_payload = {
+                "targetTemperature": current_settings_value.get('targetTemperature_C', 21), # Keep current temp (use _C version)
+                "targetTemperatureUnit": "celsius",
+                "climatizationAtUnlock": current_settings_value.get("climatizationAtUnlock", False),
+                "windowHeatingEnabled": bool(enable), # <<< Set the desired state
+                "zoneFrontLeftEnabled": current_settings_value.get("zoneFrontLeftEnabled", False),
+                "zoneFrontRightEnabled": current_settings_value.get("zoneFrontRightEnabled", False),
+                "climatisationWithoutExternalPower": True, # Assuming this is required/default
+            }
+            _LOGGER.debug("Constructed settings payload for PUT (Window Heat): %s", updated_settings_payload)
+
+            # 3. PUT the specifically constructed payload
+            success = await self.connection.async_set_climate_settings(vin_upper, updated_settings_payload)
+
+            if success:
+                _LOGGER.info("Window heating state update request sent successfully for VIN %s", vin)
+                self.hass.async_create_task(self._refresh_after_action(vin))
+            return success
+
+        except Exception as e:
+            _LOGGER.error("Error setting window heating for VIN %s: %s", vin, e, exc_info=True)
+            return False
+ 
 
     async def handle_notification(self, vin: str, action: str) -> None:
         await self._refresh_vehicle_data(vin)

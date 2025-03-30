@@ -125,17 +125,73 @@ class Instrument:
 
     @property
     def str_state(self):
-        return self.state
+        # Keep existing logic for other components
+        # Add specific formatting for climate if desired, otherwise use raw state
+        if self._component == "climate":
+            state_val = self.state # Get the raw state ('on'/'off')
+            temp_val = self.target_temperature # Get the temp
+            if temp_val is not None:
+                 return f"{state_val} ({temp_val}°C)"
+            else:
+                 return f"{state_val}"
+        # Existing logic...
+        if self.unit:
+            return "{} {}".format(self.state, self.unit)
+        else:
+            return "%s" % self.state
 
     @property
     def state(self):
-        if hasattr(self._vehicle, self._attr):
-            return getattr(self._vehicle, self._attr)
-        return self._vehicle.get_attr(self._attr)
+        """Return the primary state for the component."""
+        if self._component == "climate":
+            # For climate, the primary state is the HVAC mode ('on', 'off', etc.)
+            # Get it from the vehicle property
+            return getattr(self._vehicle, 'climatisation_state', 'unknown') # <--- Access vehicle property
+        elif hasattr(self._vehicle, self._attr):
+             # Existing logic for sensors etc. using self._attr
+             return getattr(self._vehicle, self._attr)
+        # Fallback if needed (though less likely now with explicit climate handling)
+        # return self._vehicle.get_attr(self._attr) # Original fallback if get_attr exists
+        return None
+
+    @property
+    def target_temperature(self):
+        """Return the target temperature, only relevant for climate."""
+        if self._component == "climate":
+            # Get target temp directly from the vehicle property
+            return getattr(self._vehicle, 'target_temperature', None) # <--- Access vehicle property
+        return None # Return None for non-climate components
+
+
+    # Add other properties if AudiClimate needs them from the Instrument
+    # E.g., current_temperature (if available on vehicle)
+    @property
+    def current_temperature(self):
+         if self._component == "climate":
+             # Assuming AudiConnectVehicle has an 'outdoor_temperature' property
+             return getattr(self._vehicle, 'outdoor_temperature', None)
+         return None
+
+    # Ensure vehicle_vin is accessible if needed by AudiClimate
+    @property
+    def vehicle_vin(self):
+         return self._vehicle.vin
 
     @property
     def attributes(self):
-        return {}
+        """Return additional state attributes."""
+        attrs = {}
+        if self._component == "climate":
+            # Add specific climate attributes if needed
+            attrs["remaining_time_min"] = getattr(self._vehicle, 'remaining_climatisation_time', None)
+            attrs["window_heating_enabled"] = getattr(self._vehicle, 'windowHeatingEnabled', None) # Assuming stored in state
+            attrs["zone_front_left_enabled"] = getattr(self._vehicle, 'zoneFrontLeftEnabled', None) # Assuming stored in state
+            attrs["zone_front_right_enabled"] = getattr(self._vehicle, 'zoneFrontRightEnabled', None)# Assuming stored in state
+            # Filter out None values
+            attrs = {k: v for k, v in attrs.items() if v is not None}
+        # You might add common attributes here too
+        return attrs
+
 
 
     # Specific check for climate component support
